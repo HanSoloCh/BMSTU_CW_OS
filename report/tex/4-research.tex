@@ -1,0 +1,49 @@
+Пример работы разработанного программного обеспечения
+
+После загрузки модуля файлы из списков становятся невидимыми и защищёнными.
+
+\begin{lstlisting}[language=bash, frame=single, numbers=left, caption={Добавление файлов в списки}]
+artem@artem-pc:~$ echo hidden.txt   > /proc/hidden
+artem@artem-pc:~$ echo protected.txt > /proc/protected
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, frame=single, caption={Содержимое директории после загрузки модуля}]
+artem@artem-pc:~/OS_CP$ ls
+file.txt  protected.txt
+\end{lstlisting}
+
+Файл hidden.txt полностью исчез из листинга.
+
+\begin{lstlisting}[language=bash, caption={Отключение режима скрытия}]
+artem@artem-pc:~$ echo 1234 > /dev/emblem
+\end{lstlisting}
+
+После ввода пароля 1234 файл снова виден:
+
+\begin{lstlisting}[language=bash, caption={Файлы снова видны}]
+artem@artem-pc:~/OS_CP$ ls
+file.txt  hidden.txt  protected.txt
+\end{lstlisting}
+
+Аналогично, попытка удалить или прочитать protected.txt ничего не даёт:
+
+\begin{lstlisting}[language=bash, caption={Защита от удаления и чтения работает}]
+artem@artem-pc:~$ rm protected.txt
+artem@artem-pc:~$ echo $?
+1
+artem@artem-pc:~$ cat protected.txt
+(nothing appears)
+\end{lstlisting}
+
+Отключаем защиту:
+
+\begin{lstlisting}[language=bash, caption={Отключение режима защиты}]
+artem@artem-pc:~$ echo 4321 > /dev/emblem
+\end{lstlisting}
+
+Теперь операции проходят успешно:
+
+\begin{lstlisting}[language=bash, caption={Файл снова доступен}]
+artem@artem-pc:~$ cat protected.txt
+This is a protected file
+\end{lstlisting}
